@@ -1,0 +1,4 @@
+# Install on Python 3.10+ (recommended 3.11+)
+-r requirements.txt
+mcp>=1.0.0
+openclaw-sdk>=2.1.0

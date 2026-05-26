@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "deal-cracker": {
+      "command": "python",
+      "args": ["-m", "app.openclaw.mcp_server"],
+      "cwd": "/absolute/path/to/deal-cracker",
+      "env": {
+        "SCRAPING_ENABLED": "true"
+      }
+    }
+  }
+}
