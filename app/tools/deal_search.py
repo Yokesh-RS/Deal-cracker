@@ -1,4 +1,4 @@
-"""Search static + live deals data with store, student, and product filters."""
+"""Search static JSON + category scrapers + HotUKDeals."""
 
 from __future__ import annotations
 
@@ -6,8 +6,11 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+from app.scraper_config import TOP_DEALS_COUNT
 from app.tools.deal_scraper import scrape_live_deals
 from app.tools.intent_parser import SearchIntent
+from app.tools.scrape_engine import scrape_for_intent
+from app.utils.dedup import dedupe_list
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "deals.json"
 
@@ -29,6 +32,8 @@ def _deal_text(deal: dict[str, Any]) -> str:
         deal.get("store", ""),
         deal.get("title", ""),
         deal.get("offer", ""),
+        deal.get("description", ""),
+        deal.get("discount", ""),
         " ".join(deal.get("tags") or []),
         deal.get("brand", ""),
     ]
@@ -48,8 +53,7 @@ def _matches_student(deal: dict[str, Any]) -> bool:
     tags = [t.lower() for t in deal.get("tags") or []]
     if "student" in tags:
         return True
-    text = _deal_text(deal)
-    return "student" in text
+    return "student" in _deal_text(deal)
 
 
 def _matches_product(deal: dict[str, Any], product: str) -> bool:
@@ -63,7 +67,7 @@ def _matches_product(deal: dict[str, Any], product: str) -> bool:
 
 def _category_terms(categories: list[str]) -> list[str]:
     mapping = {
-        "coffee": ["coffee", "latte", "starbucks", "costa", "cafe"],
+        "coffee": ["coffee", "latte", "starbucks", "costa", "cafe", "blacksheep"],
         "burger": ["burger", "mcdonald", "five guys", "kfc", "whopper"],
         "food": ["food", "meal", "lunch", "dinner", "nandos", "restaurant"],
         "pizza": ["pizza"],
@@ -79,7 +83,6 @@ def _category_terms(categories: list[str]) -> list[str]:
 
 
 def _matches_query_keywords(deal: dict[str, Any], intent: SearchIntent) -> bool:
-    """Relevance filter for scraped deals."""
     text = _deal_text(deal)
     if intent.store_terms and not _matches_store(deal, intent.store_terms):
         return False
@@ -90,9 +93,9 @@ def _matches_query_keywords(deal: dict[str, Any], intent: SearchIntent) -> bool:
     if intent.store and not intent.product_filter and _is_shoe_deal(deal):
         if intent.store in ("primark",):
             return False
-    # Scraped deals must mention the requested topic (avoids random HotUKDeals tag noise)
-    if deal.get("source") in ("hotukdeals", "myvouchercodes"):
-        terms = _category_terms(intent.categories) + intent.store_terms
+    live_sources = ("hotukdeals", "myvouchercodes", "scraper")
+    if deal.get("source") in live_sources and not intent.store_terms:
+        terms = _category_terms(intent.categories)
         if intent.student_only:
             terms.append("student")
         if terms and not any(t in text for t in terms if len(t) > 2):
@@ -100,10 +103,7 @@ def _matches_query_keywords(deal: dict[str, Any], intent: SearchIntent) -> bool:
     return True
 
 
-def search_deals(
-    category: str,
-    max_price: Optional[float] = None,
-) -> list[dict[str, Any]]:
+def search_deals(category: str, max_price: Optional[float] = None) -> list[dict[str, Any]]:
     category = category.lower().strip()
     results = [d for d in load_deals() if d.get("category", "").lower() == category]
     if max_price is not None:
@@ -144,53 +144,69 @@ def search_multiple_categories(
     return combined
 
 
-def _dedupe(deals: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    out: list[dict[str, Any]] = []
-    for d in deals:
-        key = f"{d.get('store')}|{d.get('title')}|{d.get('url', '')}"
-        if key not in seen:
-            seen.add(key)
-            out.append(d)
-    return out
-
-
-def search_all(intent: SearchIntent) -> list[dict[str, Any]]:
-    """
-    Merge static database + live scraped deals for this intent.
-    """
-    static: list[dict[str, Any]] = []
-
+def _search_static(intent: SearchIntent) -> list[dict[str, Any]]:
     if intent.store and intent.store_terms:
-        static = search_by_store(
+        return search_by_store(
             intent.store_terms,
             max_price=intent.max_price,
             student_only=intent.student_only,
             product_filter=intent.product_filter,
         )
-    elif intent.product_filter == "shoes":
-        static = search_deals("fashion", max_price=intent.max_price)
-        static = [d for d in static if _matches_product(d, "shoes")]
-    else:
-        static = search_multiple_categories(intent.categories, max_price=intent.max_price)
+    if intent.product_filter == "shoes":
+        results = search_deals("fashion", max_price=intent.max_price)
+        return [d for d in results if _matches_product(d, "shoes")]
+    return search_multiple_categories(intent.categories, max_price=intent.max_price)
 
-    live: list[dict[str, Any]] = []
+
+async def search_all_async(intent: SearchIntent) -> list[dict[str, Any]]:
+    """Static JSON + retailer scrapers + HotUKDeals."""
+    static = _search_static(intent)
+
+    scraped: list[dict[str, Any]] = []
     try:
-        live = scrape_live_deals(intent.scrape_query, store=intent.store)
-        live = [d for d in live if _matches_query_keywords(d, intent)]
+        scraped = await scrape_for_intent(intent)
+        scraped = [d for d in scraped if _matches_query_keywords(d, intent)]
     except Exception:
-        live = []
+        scraped = []
 
-    # Named store: never mix in unrelated category deals (e.g. Starbucks for Blacksheep)
+    aggregator: list[dict[str, Any]] = []
+    try:
+        aggregator = scrape_live_deals(intent.scrape_query, store=intent.store)
+        aggregator = [d for d in aggregator if _matches_query_keywords(d, intent)]
+    except Exception:
+        aggregator = []
+
+    merged = dedupe_list(static + scraped + aggregator)
+
     if intent.store and intent.store_terms:
-        merged = _dedupe(static + live)
-        merged = [d for d in merged if _matches_store(d, intent.store_terms)]
-        return merged
+        return [d for d in merged if _matches_store(d, intent.store_terms)]
 
-    # Prefer good static matches; only add live when static is thin
-    if len(static) >= 3:
-        merged = _dedupe(static)
-    else:
-        merged = _dedupe(static + live)
+    if len(static) >= TOP_DEALS_COUNT and not intent.store:
+        static_only = dedupe_list(static)
+        if len(static_only) >= TOP_DEALS_COUNT:
+            return static_only
 
+    return merged
+
+
+def search_all(intent: SearchIntent) -> list[dict[str, Any]]:
+    """Sync wrapper (tests / FastAPI)."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(search_all_async(intent))
+
+    # Called from running loop — use static + sync aggregator only
+    static = _search_static(intent)
+    aggregator: list[dict[str, Any]] = []
+    try:
+        aggregator = scrape_live_deals(intent.scrape_query, store=intent.store)
+        aggregator = [d for d in aggregator if _matches_query_keywords(d, intent)]
+    except Exception:
+        pass
+    merged = dedupe_list(static + aggregator)
+    if intent.store and intent.store_terms:
+        return [d for d in merged if _matches_store(d, intent.store_terms)]
     return merged

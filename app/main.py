@@ -2,7 +2,6 @@
 FastAPI service for Deal Cracker.
 
 Health check and chat API for testing without Telegram.
-Future: OpenClaw-compatible REST routes and webhooks.
 """
 
 from __future__ import annotations
@@ -33,8 +32,18 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, examples=["I want coffee"])
 
 
+class DealOut(BaseModel):
+    store: str = ""
+    title: str = ""
+    price: float = 0
+    url: str = ""
+    score: int = 0
+
+
 class ChatResponse(BaseModel):
+    headline: str
     reply: str
+    deals: list[DealOut] = []
     categories_detected: list[str] = []
 
 
@@ -46,12 +55,34 @@ def health() -> dict[str, str]:
 @app.post("/chat", response_model=ChatResponse)
 async def chat(body: ChatRequest) -> ChatResponse:
     """Process a deal query (same logic as Telegram bot)."""
+    from app.formatter import format_plain_list
+
     agent = get_agent()
     from app.agent import build_context
 
     ctx = build_context(body.message)
-    reply = await agent.process_message_async(body.message)
-    return ChatResponse(reply=reply, categories_detected=ctx.categories)
+    response = await agent.process_message_async(body.message)
+    reply = (
+        format_plain_list(response.deals, response.headline)
+        if response.deals
+        else format_plain_list([], response.headline or "No deals")
+    )
+    deals_out = [
+        DealOut(
+            store=d.get("store", ""),
+            title=d.get("title", ""),
+            price=float(d.get("price", 0)),
+            url=d.get("url", ""),
+            score=int(d.get("score", 0)),
+        )
+        for d in response.deals
+    ]
+    return ChatResponse(
+        headline=response.headline,
+        reply=reply,
+        deals=deals_out,
+        categories_detected=ctx.categories,
+    )
 
 
 @app.get("/")

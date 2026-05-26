@@ -47,14 +47,11 @@
 
 ## OpenClaw integration
 
-This project is structured for OpenClaw gateway tool-calling:
+**MCP server:** `python -m app.openclaw.mcp_server`  
+**Gateway bridge:** `app/openclaw/bridge.py` (hybrid / agent modes via `.env`)  
+**Workspace:** `openclaw/workspace/SOUL.md`
 
-- `skills.md` — skill registry (this file)
-- `app/prompts/system_prompt.txt` — agent system prompt
-- `app/agent.py` — orchestration layer with pluggable `OpenClawBridge`
-
-Set `OPENCLAW_ENABLED=true` and `OPENCLAW_GATEWAY_URL` when a live gateway is available.  
-MVP runs local intent + tools without requiring the gateway.
+When OpenClaw calls this skill, use MCP tools `search_deals` and `search_by_store` — do not invent offers.
 
 ## Future skills (planned)
 
