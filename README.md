@@ -126,7 +126,7 @@ Top 3 ranked deals returned
 ## 1. Clone Repository
 
 ```bash
-git clone <YOUR_REPO_URL>
+git clone https://github.com/Yokesh-RS/Deal-cracker
 cd deal-cracker
 ```
 
